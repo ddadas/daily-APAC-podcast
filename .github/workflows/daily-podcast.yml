@@ -1,9 +1,9 @@
 name: Daily APAC Podcast Generator
 on:
   schedule:
-    # Runs at 5:55 AM Singapore time (9:55 PM UTC previous day)
+    # Runs at 2:55 AM Singapore time (6:55 PM UTC previous day)
     # Singapore is UTC+8
-    - cron: '55 21 * * *'
+    - cron: '55 18 * * *'
   # Allow manual trigger
   workflow_dispatch:
 jobs:
