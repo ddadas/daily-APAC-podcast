@@ -1,51 +1,106 @@
 name: Daily APAC Podcast Generator
-
 on:
   schedule:
     # Runs at 5:55 AM Singapore time (9:55 PM UTC previous day)
     # Singapore is UTC+8
     - cron: '55 21 * * *'
-
   # Allow manual trigger
   workflow_dispatch:
-
 jobs:
   generate-podcast:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
+          pip install requests
       - name: Generate podcast
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python podcast_generator.py
+      - name: Upload episode to Buzzsprout
+        env:
+          BUZZSPROUT_API_TOKEN: ${{ secrets.BUZZSPROUT_API_TOKEN }}
+          BUZZSPROUT_PODCAST_ID: ${{ secrets.BUZZSPROUT_PODCAST_ID }}
+        run: |
+          python - <<'EOF'
+          import requests
+          import datetime
+          import os
+          import sys
+          import glob
 
+          # Find the MP3 generated today in podcast_episodes/
+          mp3_files = glob.glob("podcast_episodes/*.mp3")
+          if not mp3_files:
+              print("❌ No MP3 file found in podcast_episodes/")
+              sys.exit(1)
+          # Pick the most recently modified one
+          mp3_path = max(mp3_files, key=os.path.getmtime)
+          print(f"📦 Uploading: {mp3_path}")
+
+          today = datetime.date.today()
+          title = f"APAC Daily Briefing – {today.strftime('%B %d, %Y')}"
+          description = (
+              f"Your daily APAC business and strategy briefing for "
+              f"{today.strftime('%A, %B %d, %Y')}. "
+              f"Covering key developments across Southeast Asia, "
+              f"China, India, Japan, and the broader Asia-Pacific region."
+          )
+
+          podcast_id = os.environ["BUZZSPROUT_PODCAST_ID"]
+          token      = os.environ["BUZZSPROUT_API_TOKEN"]
+          url        = f"https://www.buzzsprout.com/api/{podcast_id}/episodes.json"
+
+          headers = {
+              "Authorization": f"Token token={token}",
+              "User-Agent": "daily-apac-podcast/1.0",
+          }
+
+          with open(mp3_path, "rb") as audio_file:
+              response = requests.post(
+                  url,
+                  headers=headers,
+                  data={
+                      "title":       title,
+                      "description": description,
+                      "private":     "false",
+                      "explicit":    "false",
+                  },
+                  files={"audio_file": (os.path.basename(mp3_path), audio_file, "audio/mpeg")},
+                  timeout=120,
+              )
+
+          if response.status_code in (200, 201):
+              episode = response.json()
+              print(f"✅ Episode published successfully!")
+              print(f"   ID:    {episode.get('id')}")
+              print(f"   Title: {episode.get('title')}")
+              print(f"   URL:   {episode.get('audio_url')}")
+          else:
+              print(f"❌ Upload failed: {response.status_code}")
+              print(response.text)
+              sys.exit(1)
+          EOF
       - name: Upload podcast artifacts
         uses: actions/upload-artifact@v4
         with:
           name: podcast-episodes-${{ github.run_number }}
           path: podcast_episodes/
           retention-days: 30
-
       - name: Commit and push generated files (optional)
         if: false  # Set to true if you want to commit episodes to repo
         run: |
