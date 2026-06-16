@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Your Daily APAC Business and Strategy Briefing</title>
+    <link>https://ddadas.github.io/daily-APAC-podcast</link>
+    <atom:link href="https://ddadas.github.io/daily-APAC-podcast/podcast.rss" rel="self" type="application/rss+xml" />
+    <description>A daily two-host briefing on the most interesting business and economy stories across Asia-Pacific — Singapore, Southeast Asia, India and beyond. Hosted by Maya and Theo.</description>
+    <language>en-us</language>
+    <itunes:author>Daniel Burmester</itunes:author>
+    <itunes:summary>A daily two-host briefing on the most interesting business and economy stories across Asia-Pacific.</itunes:summary>
+    <itunes:owner>
+      <itunes:name>Daniel Burmester</itunes:name>
+      <itunes:email>burmesterdaniel6@gmail.com</itunes:email>
+    </itunes:owner>
+    <itunes:image href="https://ddadas.github.io/daily-APAC-podcast/cover.jpg" />
+    <itunes:explicit>false</itunes:explicit>
+    <itunes:category text="Business">
+      <itunes:category text="News" />
+    </itunes:category>
+    <itunes:type>episodic</itunes:type>
+  </channel>
+</rss>

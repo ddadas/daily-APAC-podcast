@@ -3,12 +3,17 @@ name: Daily APAC Podcast Generator
 on:
   schedule:
     # 5:00 AM Singapore time (SGT, UTC+8) = 21:00 UTC the previous day.
-    # We start at 5 AM SGT so the episode is generated, uploaded to Buzzsprout,
-    # and ingested by Spotify well before 6:30 AM SGT.
+    # We start at 5 AM SGT so the episode is generated, uploaded as a GitHub
+    # Release, and the RSS feed is regenerated before 6:30 AM SGT. Spotify
+    # polls the feed served by GitHub Pages.
     - cron: '0 21 * * *'
 
   # Allow manual trigger from the Actions tab.
   workflow_dispatch:
+
+permissions:
+  # Required to create releases, upload assets, and commit docs/podcast.rss.
+  contents: write
 
 jobs:
   generate-podcast:
@@ -34,20 +39,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Generate podcast and publish to Buzzsprout
+      - name: Generate episode and publish to GitHub Releases + RSS
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # Buzzsprout auto-publish (drives Spotify via the existing RSS feed).
-          # The v18 podcast_generator.py uploads the MP3 with rich show notes
-          # built from the day's featured stories. No separate workflow step needed.
-          BUZZSPROUT_API_TOKEN: ${{ secrets.BUZZSPROUT_API_TOKEN }}
-          BUZZSPROUT_PODCAST_ID: ${{ secrets.BUZZSPROUT_PODCAST_ID || '2606352' }}
-          BUZZSPROUT_PUBLISH: '1'
+          # GITHUB_TOKEN and GITHUB_REPOSITORY are auto-provided by Actions.
+          # The script reads both to (1) create a release for today's MP3 and
+          # (2) regenerate docs/podcast.rss from the full release history.
         run: |
           python podcast_generator.py
 
-      - name: Upload podcast artifacts
+      - name: Commit regenerated podcast.rss
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          if [[ -n "$(git status --porcelain docs/podcast.rss)" ]]; then
+            git add docs/podcast.rss
+            git commit -m "Update podcast.rss for $(date -u +'%Y-%m-%d')"
+            git push
+          else
+            echo "podcast.rss unchanged — nothing to commit."
+          fi
+
+      - name: Upload local artifacts (script, sources, Word doc)
         if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -24,7 +24,7 @@ Requires in .env:  ANTHROPIC_API_KEY  and  OPENAI_API_KEY (for premium voices)
 
 import os, logging, datetime, re, asyncio, time, json, html, sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 import feedparser
@@ -607,12 +607,47 @@ def save_sources_file(picks, all_articles, sources_file):
 
 
 # ───────────────────────────────────────────────────────────────
-# Buzzsprout publishing (auto-upload -> Spotify via your RSS feed)
+# Publishing — GitHub Releases as audio host + self-hosted RSS feed
 # ───────────────────────────────────────────────────────────────
+# Each episode becomes its own GitHub Release. The MP3 is uploaded as a release
+# asset (free, public, no upload caps). A small episode.json sidecar carries
+# duration + sources so we can rebuild the podcast RSS feed later without
+# re-downloading the MP3. After each upload we regenerate docs/podcast.rss by
+# walking the full list of releases — that file is served by GitHub Pages and is
+# what Spotify (and Apple, Overcast, etc.) polls.
+
+# Show metadata — override via env vars if needed.
+PODCAST_TITLE = os.getenv("PODCAST_TITLE", "Your Daily APAC Business and Strategy Briefing")
+PODCAST_AUTHOR = os.getenv("PODCAST_AUTHOR", "Daniel Burmester")
+PODCAST_OWNER_EMAIL = os.getenv("PODCAST_OWNER_EMAIL", "burmesterdaniel6@gmail.com")
+PODCAST_DESCRIPTION = os.getenv(
+    "PODCAST_DESCRIPTION",
+    "A daily two-host briefing on the most interesting business and economy stories "
+    "across Asia-Pacific — Singapore, Southeast Asia, India and beyond. "
+    f"Hosted by {HOST_A_NAME} and {HOST_B_NAME}.",
+)
+PODCAST_LANGUAGE = os.getenv("PODCAST_LANGUAGE", "en-us")
+PODCAST_CATEGORY = os.getenv("PODCAST_CATEGORY", "Business")
+PODCAST_SUBCATEGORY = os.getenv("PODCAST_SUBCATEGORY", "News")
+
+
+def _pages_base_url():
+    """The GitHub Pages base where docs/ is served from."""
+    repo = os.getenv("GITHUB_REPOSITORY", "")  # "owner/repo"
+    if "/" in repo:
+        owner, name = repo.split("/", 1)
+        return f"https://{owner}.github.io/{name}"
+    return os.getenv("PODCAST_SITE_URL", "https://example.github.io/daily-APAC-podcast")
+
+
+def _cover_url():
+    return os.getenv("PODCAST_COVER_URL", f"{_pages_base_url()}/cover.jpg")
+
+
 def build_episode_description(picks):
     """Short HTML show-notes built from the featured stories + sources."""
-    parts = ["<p>Today on " + SHOW_NAME + ", " + HOST_A_NAME + " and " + HOST_B_NAME +
-             " break down the most interesting business and economy stories across Asia-Pacific.</p>",
+    parts = [f"<p>Today on {SHOW_NAME}, {HOST_A_NAME} and {HOST_B_NAME} "
+             "break down the most interesting business and economy stories across Asia-Pacific.</p>",
              "<p><strong>In this episode:</strong></p><ul>"]
     for a in picks:
         parts.append(f"<li>{html.escape(a['title'])}</li>")
@@ -623,59 +658,285 @@ def build_episode_description(picks):
     return "".join(parts)
 
 
-def upload_to_buzzsprout(mp3_file, picks, episode_title):
-    """Upload the MP3 to Buzzsprout. Returns True on success.
+def build_release_body_markdown(picks):
+    """Markdown shown on the GitHub Release page itself (human-readable)."""
+    lines = [f"Daily {SHOW_NAME} episode with {HOST_A_NAME} and {HOST_B_NAME}.", "",
+             "**In this episode:**"]
+    for a in picks:
+        lines.append(f"- {a['title']}")
+    lines.append("")
+    lines.append("**Sources:**")
+    for a in picks:
+        lines.append(f"- [{a['source']}]({a['url']}) — {a['title']}")
+    return "\n".join(lines)
 
-    Controlled entirely by environment variables so manual local runs are
-    unaffected unless you opt in:
-      BUZZSPROUT_API_TOKEN   - your API token (Buzzsprout -> My Account)
-      BUZZSPROUT_PODCAST_ID  - your podcast id (default 2606352, from your dashboard URL)
-      BUZZSPROUT_PUBLISH     - set to "1"/"true" to actually publish; otherwise skipped
-      BUZZSPROUT_PRIVATE     - "1"/"true" to upload as private/draft (default public)
-    """
-    token = os.getenv("BUZZSPROUT_API_TOKEN")
-    publish_flag = os.getenv("BUZZSPROUT_PUBLISH", "").lower() in ("1", "true", "yes")
 
-    if not publish_flag:
-        print("Buzzsprout: skipped (set BUZZSPROUT_PUBLISH=1 to enable auto-upload).")
-        return False
-    if not token:
-        print("Buzzsprout: ERROR - BUZZSPROUT_PUBLISH is on but BUZZSPROUT_API_TOKEN is missing.")
-        return False
+def _get_audio_duration_seconds(mp3_path):
+    try:
+        audio = AudioSegment.from_mp3(str(mp3_path))
+        return int(round(len(audio) / 1000))
+    except Exception:
+        return 0
 
-    podcast_id = os.getenv("BUZZSPROUT_PODCAST_ID", "2606352")
-    is_private = os.getenv("BUZZSPROUT_PRIVATE", "").lower() in ("1", "true", "yes")
-    url = f"https://www.buzzsprout.com/api/{podcast_id}/episodes.json"
 
-    data = {
-        "title": episode_title,
-        "description": build_episode_description(picks),
-        "private": "true" if is_private else "false",
-        "published_at": datetime.now().astimezone().isoformat(),
-        "email_user_after_audio_processed": "false",
-    }
-    headers = {
-        "Authorization": f"Token token={token}",
+def _format_duration_hms(seconds):
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _rfc822(dt):
+    """RFC 822 / RFC 1123 date for RSS pubDate. dt must be timezone-aware."""
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.strftime("%a, %d %b %Y %H:%M:%S %z")
+
+
+def _gh_headers(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": f"{SHOW_NAME}-generator/1.0",
     }
 
-    try:
-        print(f"Buzzsprout: uploading episode to podcast {podcast_id}...")
-        with open(mp3_file, "rb") as f:
-            files = {"audio_file": (Path(mp3_file).name, f, "audio/mpeg")}
-            resp = requests.post(url, headers=headers, data=data, files=files, timeout=300)
-        if resp.status_code in (200, 201):
-            ep = resp.json()
-            vis = "private/draft" if is_private else "public"
-            print(f"OK: Buzzsprout episode created ({vis}) - id {ep.get('id')}, title \"{ep.get('title')}\".")
-            print("    Spotify will pick it up from your RSS feed automatically.")
-            return True
-        else:
-            print(f"Buzzsprout: upload failed (HTTP {resp.status_code}): {resp.text[:300]}")
-            return False
-    except Exception as e:
-        print(f"Buzzsprout: upload error: {e}")
+
+def publish_to_github_releases(mp3_file, picks, episode_title):
+    """Create a GitHub Release for this episode and rebuild docs/podcast.rss.
+
+    Requires the following env vars (auto-set in GitHub Actions):
+      GITHUB_TOKEN       - token with `contents: write` on this repo
+      GITHUB_REPOSITORY  - owner/repo, e.g. "ddadas/daily-APAC-podcast"
+
+    Returns the release dict on success, None on skip/failure.
+    """
+    token = os.getenv("GITHUB_TOKEN")
+    repo = os.getenv("GITHUB_REPOSITORY")
+    if not (token and repo):
+        print("GitHub Release: skipped (GITHUB_TOKEN / GITHUB_REPOSITORY not set).")
+        print("    To publish locally, run inside Actions or set both env vars manually.")
+        return None
+
+    tag = Path(mp3_file).stem  # e.g. "apac_brief_2026-06-16_05-00"
+    duration_seconds = _get_audio_duration_seconds(mp3_file)
+    size_bytes = Path(mp3_file).stat().st_size
+    pub_at = datetime.now().astimezone()
+
+    # Create the release
+    api_root = f"https://api.github.com/repos/{repo}/releases"
+    headers = _gh_headers(token)
+    create_payload = {
+        "tag_name": tag,
+        "name": episode_title,
+        "body": build_release_body_markdown(picks),
+        "draft": False,
+        "prerelease": False,
+    }
+    print(f"GitHub Release: creating release '{tag}'...")
+    resp = requests.post(api_root, json=create_payload, headers=headers, timeout=60)
+    if resp.status_code not in (200, 201):
+        print(f"GitHub Release: create failed (HTTP {resp.status_code}): {resp.text[:300]}")
+        return None
+    release = resp.json()
+    upload_base = release["upload_url"].split("{")[0]
+
+    # Upload the MP3
+    print(f"GitHub Release: uploading MP3 ({size_bytes / 1024 / 1024:.1f} MB)...")
+    mp3_name = Path(mp3_file).name
+    with open(mp3_file, "rb") as f:
+        mp3_bytes = f.read()
+    up = requests.post(
+        upload_base,
+        params={"name": mp3_name, "label": "Episode audio (MP3)"},
+        headers={**headers, "Content-Type": "audio/mpeg"},
+        data=mp3_bytes,
+        timeout=600,
+    )
+    if up.status_code not in (200, 201):
+        print(f"GitHub Release: MP3 upload failed (HTTP {up.status_code}): {up.text[:300]}")
+        return None
+    mp3_asset = up.json()
+
+    # Upload episode.json sidecar so future RSS rebuilds can recover the metadata
+    episode_meta = {
+        "title": episode_title,
+        "tag": tag,
+        "duration_seconds": duration_seconds,
+        "size_bytes": size_bytes,
+        "published_at": pub_at.isoformat(),
+        "description_html": build_episode_description(picks),
+        "summary": f"Daily {SHOW_NAME} briefing with {HOST_A_NAME} and {HOST_B_NAME}.",
+        "stories": [
+            {"title": a["title"], "source": a["source"], "url": a["url"],
+             "angle": a.get("editor_angle", "")}
+            for a in picks
+        ],
+    }
+    meta_bytes = json.dumps(episode_meta, indent=2).encode("utf-8")
+    print("GitHub Release: uploading episode.json sidecar...")
+    up2 = requests.post(
+        upload_base,
+        params={"name": "episode.json", "label": "Episode metadata"},
+        headers={**headers, "Content-Type": "application/json"},
+        data=meta_bytes,
+        timeout=60,
+    )
+    if up2.status_code not in (200, 201):
+        # Non-fatal: RSS rebuild can fall back to release body
+        print(f"GitHub Release: episode.json upload failed (HTTP {up2.status_code}). Continuing.")
+
+    print(f"OK: GitHub Release published — {release['html_url']}")
+    print(f"    MP3 URL: {mp3_asset['browser_download_url']}")
+    return release
+
+
+def regenerate_podcast_rss(rss_path):
+    """Rebuild the podcast RSS feed by walking all releases in the repo.
+
+    The RSS feed lives at docs/podcast.rss and is served by GitHub Pages.
+    Spotify / Apple / Overcast all poll it.
+    """
+    token = os.getenv("GITHUB_TOKEN")
+    repo = os.getenv("GITHUB_REPOSITORY")
+    if not repo:
+        print("RSS regen: skipped (GITHUB_REPOSITORY not set).")
         return False
+
+    headers = _gh_headers(token) if token else {"Accept": "application/vnd.github+json"}
+
+    releases = []
+    page = 1
+    while True:
+        r = requests.get(
+            f"https://api.github.com/repos/{repo}/releases",
+            params={"per_page": 100, "page": page},
+            headers=headers,
+            timeout=60,
+        )
+        if r.status_code != 200:
+            print(f"RSS regen: failed to list releases (HTTP {r.status_code}): {r.text[:200]}")
+            return False
+        batch = r.json()
+        if not batch:
+            break
+        releases.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+
+    items_xml = []
+    kept = 0
+    for rel in releases:
+        if rel.get("draft") or rel.get("prerelease"):
+            continue
+        mp3_asset = next(
+            (a for a in rel.get("assets", []) if a["name"].lower().endswith(".mp3")),
+            None,
+        )
+        if not mp3_asset:
+            continue
+        meta_asset = next(
+            (a for a in rel.get("assets", []) if a["name"] == "episode.json"),
+            None,
+        )
+        # Pull metadata from sidecar if available
+        duration_seconds = 0
+        description_html = rel.get("body") or ""
+        if meta_asset:
+            try:
+                # Asset is public for public repos — no auth needed.
+                m = requests.get(meta_asset["browser_download_url"], timeout=30)
+                if m.status_code == 200:
+                    meta = m.json()
+                    duration_seconds = int(meta.get("duration_seconds", 0))
+                    description_html = meta.get("description_html") or description_html
+            except Exception:
+                pass
+
+        pub_iso = rel.get("published_at") or rel.get("created_at")
+        try:
+            pub_dt = datetime.strptime(pub_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except Exception:
+            pub_dt = datetime.now().astimezone()
+
+        title = rel.get("name") or rel.get("tag_name")
+        guid = rel.get("tag_name")
+        mp3_url = mp3_asset["browser_download_url"]
+        mp3_size = mp3_asset.get("size", 0)
+
+        items_xml.append(_render_item(
+            title=title,
+            guid=guid,
+            url=mp3_url,
+            size_bytes=mp3_size,
+            duration_seconds=duration_seconds,
+            pub_dt=pub_dt,
+            description_html=description_html,
+        ))
+        kept += 1
+
+    rss_xml = _render_channel(items_xml)
+    Path(rss_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(rss_path).write_text(rss_xml, encoding="utf-8")
+    print(f"OK: RSS feed regenerated with {kept} episode(s) -> {rss_path}")
+    return True
+
+
+def _render_item(title, guid, url, size_bytes, duration_seconds, pub_dt, description_html):
+    safe_title = html.escape(title)
+    safe_guid = html.escape(guid)
+    duration_str = _format_duration_hms(duration_seconds) if duration_seconds else "10:00"
+    return f"""    <item>
+      <title>{safe_title}</title>
+      <description><![CDATA[{description_html}]]></description>
+      <content:encoded><![CDATA[{description_html}]]></content:encoded>
+      <pubDate>{_rfc822(pub_dt)}</pubDate>
+      <guid isPermaLink="false">{safe_guid}</guid>
+      <enclosure url="{html.escape(url)}" length="{int(size_bytes)}" type="audio/mpeg" />
+      <itunes:author>{html.escape(PODCAST_AUTHOR)}</itunes:author>
+      <itunes:duration>{duration_str}</itunes:duration>
+      <itunes:summary>{safe_title}</itunes:summary>
+      <itunes:explicit>false</itunes:explicit>
+    </item>"""
+
+
+def _render_channel(items_xml):
+    title = html.escape(PODCAST_TITLE)
+    desc = html.escape(PODCAST_DESCRIPTION)
+    author = html.escape(PODCAST_AUTHOR)
+    email = html.escape(PODCAST_OWNER_EMAIL)
+    cover = html.escape(_cover_url())
+    site = html.escape(_pages_base_url())
+    items_block = "\n".join(items_xml) if items_xml else ""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>{title}</title>
+    <link>{site}</link>
+    <atom:link href="{site}/podcast.rss" rel="self" type="application/rss+xml" />
+    <description>{desc}</description>
+    <language>{html.escape(PODCAST_LANGUAGE)}</language>
+    <copyright>(c) {datetime.now().year} {author}</copyright>
+    <lastBuildDate>{_rfc822(datetime.now().astimezone())}</lastBuildDate>
+    <itunes:author>{author}</itunes:author>
+    <itunes:summary>{desc}</itunes:summary>
+    <itunes:owner>
+      <itunes:name>{author}</itunes:name>
+      <itunes:email>{email}</itunes:email>
+    </itunes:owner>
+    <itunes:image href="{cover}" />
+    <itunes:explicit>false</itunes:explicit>
+    <itunes:category text="{html.escape(PODCAST_CATEGORY)}">
+      <itunes:category text="{html.escape(PODCAST_SUBCATEGORY)}" />
+    </itunes:category>
+    <itunes:type>episodic</itunes:type>
+{items_block}
+  </channel>
+</rss>
+"""
 
 
 # ───────────────────────────────────────────────────────────────
@@ -760,10 +1021,16 @@ def main():
             print(f"  {words} words | ~{words/150:.0f} min | {size_mb:.1f} MB | {len(turns)} turns")
             print("=" * 70)
 
-            # Optional: publish to Buzzsprout (-> Spotify). No-op unless BUZZSPROUT_PUBLISH=1.
-            episode_title = f"{SHOW_NAME} — {datetime.now().strftime('%A, %B %d, %Y')}"
-            print("\n[5/5] PUBLISHING:")
-            upload_to_buzzsprout(mp3_file, picks, episode_title)
+            # Publish to GitHub Releases and regenerate docs/podcast.rss.
+            # Spotify polls the RSS feed served by GitHub Pages.
+            episode_title = f"{PODCAST_TITLE} — {datetime.now().strftime('%A, %B %d, %Y')}"
+            print("\n[5/5] PUBLISHING to GitHub Releases + RSS:")
+            release = publish_to_github_releases(mp3_file, picks, episode_title)
+            if release:
+                rss_path = script_dir / "docs" / "podcast.rss"
+                regenerate_podcast_rss(rss_path)
+                print(f"\n    Feed URL (submit this once to Spotify for Podcasters):")
+                print(f"    {_pages_base_url()}/podcast.rss")
         else:
             print("\nERROR: audio generation failed (script + docs were still saved).")
 
