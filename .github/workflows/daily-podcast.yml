@@ -43,9 +43,10 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # GITHUB_TOKEN and GITHUB_REPOSITORY are auto-provided by Actions.
-          # The script reads both to (1) create a release for today's MP3 and
-          # (2) regenerate docs/podcast.rss from the full release history.
+          # GITHUB_TOKEN must be passed explicitly — it isn't inherited by
+          # the script's process automatically. Same for the repo slug.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           python podcast_generator.py
 
