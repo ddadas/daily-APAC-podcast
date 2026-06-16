@@ -9,8 +9,10 @@
     <atom:link href="https://ddadas.github.io/daily-APAC-podcast/podcast.rss" rel="self" type="application/rss+xml" />
     <description>A daily two-host briefing on the most interesting business and economy stories across Asia-Pacific — Singapore, Southeast Asia, India and beyond. Hosted by Maya and Theo.</description>
     <language>en-us</language>
+    <copyright>(c) 2026 Daniel Burmester</copyright>
+    <lastBuildDate>Tue, 16 Jun 2026 13:53:17 +0000</lastBuildDate>
     <itunes:author>Daniel Burmester</itunes:author>
-    <itunes:summary>A daily two-host briefing on the most interesting business and economy stories across Asia-Pacific.</itunes:summary>
+    <itunes:summary>A daily two-host briefing on the most interesting business and economy stories across Asia-Pacific — Singapore, Southeast Asia, India and beyond. Hosted by Maya and Theo.</itunes:summary>
     <itunes:owner>
       <itunes:name>Daniel Burmester</itunes:name>
       <itunes:email>burmesterdaniel6@gmail.com</itunes:email>
@@ -21,5 +23,6 @@
       <itunes:category text="News" />
     </itunes:category>
     <itunes:type>episodic</itunes:type>
+
   </channel>
 </rss>
