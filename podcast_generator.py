@@ -785,16 +785,31 @@ def publish_to_github_releases(mp3_file, picks, episode_title):
         # Non-fatal: RSS rebuild can fall back to release body
         print(f"GitHub Release: episode.json upload failed (HTTP {up2.status_code}). Continuing.")
 
+    # Re-fetch the release so we get the fully-populated asset list. The list
+    # endpoint used later for RSS regen reads from a cache that briefly lags
+    # behind asset uploads, so we hand the regen the canonical record directly.
+    refreshed = requests.get(
+        f"{api_root}/{release['id']}",
+        headers=headers,
+        timeout=30,
+    )
+    if refreshed.status_code == 200:
+        release = refreshed.json()
+
     print(f"OK: GitHub Release published — {release['html_url']}")
     print(f"    MP3 URL: {mp3_asset['browser_download_url']}")
     return release
 
 
-def regenerate_podcast_rss(rss_path):
+def regenerate_podcast_rss(rss_path, ensure_release=None):
     """Rebuild the podcast RSS feed by walking all releases in the repo.
 
     The RSS feed lives at docs/podcast.rss and is served by GitHub Pages.
     Spotify / Apple / Overcast all poll it.
+
+    `ensure_release`, if provided, is a release dict that MUST be present in
+    the output even if GitHub's list endpoint hasn't surfaced it yet (it has
+    a short cache lag right after creation).
     """
     token = os.getenv("GITHUB_TOKEN")
     repo = os.getenv("GITHUB_REPOSITORY")
@@ -823,6 +838,11 @@ def regenerate_podcast_rss(rss_path):
         if len(batch) < 100:
             break
         page += 1
+
+    # Merge in the just-created release if the list endpoint hasn't caught up.
+    if ensure_release:
+        if not any(r.get("id") == ensure_release.get("id") for r in releases):
+            releases.insert(0, ensure_release)
 
     items_xml = []
     kept = 0
@@ -1028,7 +1048,7 @@ def main():
             release = publish_to_github_releases(mp3_file, picks, episode_title)
             if release:
                 rss_path = script_dir / "docs" / "podcast.rss"
-                regenerate_podcast_rss(rss_path)
+                regenerate_podcast_rss(rss_path, ensure_release=release)
                 print(f"\n    Feed URL (submit this once to Spotify for Podcasters):")
                 print(f"    {_pages_base_url()}/podcast.rss")
         else:
