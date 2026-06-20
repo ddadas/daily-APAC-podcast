@@ -2,11 +2,12 @@ name: Daily APAC Podcast Generator
 
 on:
   schedule:
-    # 5:00 AM Singapore time (SGT, UTC+8) = 21:00 UTC the previous day.
-    # We start at 5 AM SGT so the episode is generated, uploaded as a GitHub
-    # Release, and the RSS feed is regenerated before 6:30 AM SGT. Spotify
-    # polls the feed served by GitHub Pages.
-    - cron: '0 21 * * *'
+    # 3:00 AM Singapore time (SGT, UTC+8) = 19:00 UTC the previous day.
+    # GitHub Actions routinely delays scheduled runs by 30-120 min during
+    # peak load, so we schedule ~3-4 h ahead of the 6:30 AM SGT publish
+    # target to absorb that variance. Even on a bad day the episode should
+    # be on GitHub by ~5:30 AM SGT, leaving Spotify time to poll.
+    - cron: '0 19 * * *'
 
   # Allow manual trigger from the Actions tab.
   workflow_dispatch:
@@ -47,6 +48,10 @@ jobs:
           # the script's process automatically. Same for the repo slug.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          # Run with Singapore time so episode titles, release tags, and
+          # pubDate stamps reflect the listener's date (e.g. "Saturday,
+          # June 20, 2026") rather than UTC the night before.
+          TZ: Asia/Singapore
         run: |
           python podcast_generator.py
 
