@@ -253,14 +253,95 @@ class APACNewsScraper:
 
 
 # ───────────────────────────────────────────────────────────────
+# Episode memory — pull the last few episodes so we don't repeat
+# ───────────────────────────────────────────────────────────────
+def fetch_recent_episode_memory(n=3):
+    """Return up to N recent episodes' picked stories, newest first.
+
+    Reads each release's episode.json sidecar. Used to avoid duplicate
+    coverage and to allow rare callbacks for genuine follow-ups.
+    """
+    repo = os.getenv("GITHUB_REPOSITORY")
+    if not repo:
+        return []
+    token = os.getenv("GITHUB_TOKEN")
+    headers = _gh_headers(token) if token else {"Accept": "application/vnd.github+json"}
+
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{repo}/releases",
+            params={"per_page": n + 5},
+            headers=headers,
+            timeout=30,
+        )
+        if r.status_code != 200:
+            return []
+        releases = [rel for rel in r.json()
+                    if not rel.get("draft") and not rel.get("prerelease")][:n]
+    except Exception as e:
+        print(f"WARNING: could not list releases for memory ({e}); skipping.")
+        return []
+
+    memory = []
+    for rel in releases:
+        meta_asset = next(
+            (a for a in rel.get("assets", []) if a["name"] == "episode.json"),
+            None,
+        )
+        if not meta_asset:
+            continue
+        try:
+            m = requests.get(meta_asset["browser_download_url"], timeout=15)
+            if m.status_code != 200:
+                continue
+            data = m.json()
+            memory.append({
+                "tag": data.get("tag") or rel.get("tag_name"),
+                "published_at": data.get("published_at") or rel.get("published_at"),
+                "stories": data.get("stories", []),
+            })
+        except Exception:
+            continue
+    return memory
+
+
+def format_memory_brief(memory):
+    """One compact string listing what each recent episode covered."""
+    if not memory:
+        return ""
+    lines = []
+    for i, ep in enumerate(memory):
+        when = "Yesterday" if i == 0 else f"{i + 1} days ago"
+        story_titles = [s.get("title", "").strip() for s in ep.get("stories", [])]
+        story_titles = [t for t in story_titles if t]
+        if not story_titles:
+            continue
+        lines.append(f"- {when}: " + " | ".join(story_titles))
+    return "\n".join(lines)
+
+
+# ───────────────────────────────────────────────────────────────
 # STEP 1 — Editorial curation: pick the most interesting stories
 # ───────────────────────────────────────────────────────────────
-def curate_top_stories(articles, target=4):
+def curate_top_stories(articles, target=4, recent_memory=None):
     """Ask Claude to rank stories by general-listener interest and pick the best."""
     menu = ""
     for i, a in enumerate(articles, 1):
         menu += f"[{i}] {a['title']}  (source: {a['source']})\n"
         menu += f"     {a['summary'][:220]}\n\n"
+
+    memory_brief = format_memory_brief(recent_memory or [])
+    memory_block = ""
+    if memory_brief:
+        memory_block = f"""
+RECENT COVERAGE — stories the audience has already heard in the last 3 episodes:
+{memory_brief}
+
+When choosing today's stories: SKIP any that are essentially the same as items above,
+unless there has been a genuinely NEW development today worth covering as a follow-up.
+Prefer fresh topics. If you DO pick a follow-up to a recent story, make that explicit
+in your angle (e.g. "follow-up: <what's new today>") so the writer knows.
+"""
 
     prompt = f"""You are the editor of a daily APAC news podcast for GENERAL, CURIOUS listeners
 (not finance specialists). From the story menu below, choose the {target} stories that will be
@@ -270,7 +351,7 @@ MOST INTERESTING and ENJOYABLE for a broad audience and most likely to make some
 Score each story on: surprise/novelty, human stakes, "why should I care", and tell-a-friend factor.
 Prefer a MIX of topics (not 4 market-recap stories). Avoid pure technical/corporate-action items
 unless they have a genuinely interesting angle.
-
+{memory_block}
 Return ONLY valid JSON in this exact shape, no prose:
 {{"picks": [{{"id": <number>, "angle": "<one sentence: the human hook / why a normal person cares>"}}, ...]}}
 
@@ -320,13 +401,30 @@ def build_story_brief(picks):
     return brief
 
 
-def generate_two_host_script(picks):
+def generate_two_host_script(picks, recent_memory=None):
     brief = build_story_brief(picks)
+    memory_brief = format_memory_brief(recent_memory or [])
+    continuity_block = ""
+    if memory_brief:
+        continuity_block = f"""
+CONTINUITY (important):
+Recent episodes the listener has already heard:
+{memory_brief}
+
+- DO NOT re-explain or recap any of those stories. Assume the listener already has
+  the basic context.
+- Reference a previous episode ONLY if today's story is a clear, direct continuation
+  that genuinely benefits from naming the link (e.g. "the same deal we mentioned
+  earlier this week now has a price"). Earn the callback.
+- DO NOT routinely say things like "as we discussed yesterday" or "remember when
+  we covered..." — those references should feel rare and meaningful, not habitual.
+- If none of today's stories connect back, don't reference past episodes at all.
+"""
 
     prompt = f"""Write a lively, genuinely ENJOYABLE two-host news podcast script for {SHOW_NAME},
 a daily show about Asia-Pacific for GENERAL, CURIOUS listeners (think smart friends, not finance pros).
 Date: {datetime.now().strftime('%A, %B %d, %Y')}.
-
+{continuity_block}
 THE TWO HOSTS:
 - {HOST_A_NAME}: the warm anchor who tells the story and explains things clearly.
 - {HOST_B_NAME}: the curious co-host who asks the questions a normal listener is thinking,
@@ -996,13 +1094,19 @@ def main():
             raise Exception("No usable articles found")
         EXTRACTED_ARTICLES = articles
 
-        # Curate the best stories for a general audience
+        # Pull the last 3 episodes' picked stories so we can avoid
+        # repeating them and only call back when genuinely relevant.
         print("\n[2/4] EDITOR: choosing the most interesting stories...")
-        picks = curate_top_stories(articles, target=4)
+        recent_memory = fetch_recent_episode_memory(n=3)
+        if recent_memory:
+            print(f"    Loaded memory of {len(recent_memory)} prior episode(s) to avoid repetition.")
+        else:
+            print("    No prior episodes found — cold start.")
+        picks = curate_top_stories(articles, target=4, recent_memory=recent_memory)
 
         # Write the engaging two-host script
         print("\n[3/4] WRITER: composing the episode...")
-        script = generate_two_host_script(picks)
+        script = generate_two_host_script(picks, recent_memory=recent_memory)
         turns = parse_turns(script)
         if not turns:
             raise Exception("Script could not be parsed into host turns — check format.")
