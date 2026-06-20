@@ -279,7 +279,7 @@ STORY MENU:
 
     try:
         resp = anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-4-6",
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -382,7 +382,7 @@ Now write the full two-host script, alternating {HOST_A_NAME}: and {HOST_B_NAME}
 
     print("Writing the two-host script...")
     resp = anthropic_client.messages.create(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-6",
         max_tokens=4000,
         messages=[{"role": "user", "content": prompt}],
     )
